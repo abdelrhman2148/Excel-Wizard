@@ -1,0 +1,5 @@
+{
+  "name": "Excel Wizard",
+  "description": "An intelligent assistant that converts natural language requests into complex Excel formulas instantly.",
+  "requestFramePermissions": []
+}
