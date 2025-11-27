@@ -12,6 +12,7 @@ export interface User {
   lastUsageDate: string; // ISO date string YYYY-MM-DD
   organizationId?: string;
   isAdmin?: boolean;
+  hasOnboarded?: boolean;
 }
 
 export interface ApiKey {
@@ -113,4 +114,13 @@ export interface TeamSettingsData {
   preferredFunctions: string;
   formattingRules: string;
   language: string;
+}
+
+export interface FeedbackLog {
+  id: string;
+  userId: string;
+  prompt: string;
+  response: string;
+  isHelpful: boolean;
+  timestamp: number;
 }

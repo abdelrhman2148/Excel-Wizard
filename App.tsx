@@ -13,12 +13,14 @@ import { TeamSettings } from './components/TeamSettings';
 import { AuthScreen } from './components/AuthScreen';
 import { Marketplace } from './components/Marketplace';
 import { DeveloperPortal } from './components/DeveloperPortal';
+import { OnboardingModal } from './components/OnboardingModal';
 
 import { generateOrDebugFormula } from './services/geminiService';
 import { parseFileContext, generateDemoSheet, executeWorkflow } from './services/fileService';
 import { 
-  loginMock, getCurrentUser, logoutMock, incrementUsage, checkUsageLimit, upgradeUserPlan, DAILY_LIMIT_FREE 
+  loginMock, getCurrentUser, logoutMock, incrementUsage, checkUsageLimit, upgradeUserPlan, DAILY_LIMIT_FREE, completeOnboarding 
 } from './services/authService';
+import { trackEvent, logFeedback } from './services/analyticsService';
 
 import { WizardResponse, AnalyticsData, AppMode, Platform, FileContextData, HistoryItem, TeamSettingsData, Workflow, User, PlanType } from './types';
 import { Toaster, toast } from 'react-hot-toast';
@@ -46,6 +48,7 @@ export default function App() {
   const [showUpgrade, setShowUpgrade] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(false);
   
   const [teamSettings, setTeamSettings] = useState<TeamSettingsData>(() => {
     const saved = localStorage.getItem('excel_wizard_team_settings');
@@ -65,17 +68,55 @@ export default function App() {
   useEffect(() => {
     const u = getCurrentUser();
     setUser(u);
+    if (u && !u.hasOnboarded) {
+      setShowOnboarding(true);
+    }
     setLoadingAuth(false);
+    
+    // Tip of the Day
+    if (u) {
+      setTimeout(() => {
+        const tips = ["Pro Tip: Use 'Debug' mode to fix errors instantly.", "Did you know? You can upload a sheet for context.", "Try 'Automate' to run multiple steps at once."];
+        toast(tips[Math.floor(Math.random() * tips.length)], { icon: '💡', duration: 4000, position: 'bottom-center' });
+      }, 5000);
+    }
   }, []);
 
   useEffect(() => { localStorage.setItem('excel_wizard_history', JSON.stringify(history)); }, [history]);
   useEffect(() => { localStorage.setItem('excel_wizard_team_settings', JSON.stringify(teamSettings)); }, [teamSettings]);
   useEffect(() => { localStorage.setItem('excel_wizard_workflows', JSON.stringify(workflows)); }, [workflows]);
 
+  // --- Keyboard Shortcuts ---
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
+
+      // Shortcuts that work when NOT typing
+      if (!isInput) {
+         if (e.key.toLowerCase() === 'c' && result?.steps?.[0]?.action === 'formula') {
+           e.preventDefault();
+           navigator.clipboard.writeText(result.steps[0].value);
+           toast.success("Copied to clipboard!");
+         }
+         if (e.key.toLowerCase() === 'd') {
+           e.preventDefault();
+           setMode('debug');
+           setActiveTab('tool');
+           toast("Switched to Debug mode");
+         }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [result]);
+
   // --- Auth Handlers ---
   const handleLogin = async (email: string) => {
     const u = await loginMock(email);
     setUser(u);
+    trackEvent('login', { userId: u.id });
+    if (!u.hasOnboarded) setShowOnboarding(true);
     toast.success(`Welcome back, ${u.name}!`);
   };
 
@@ -90,8 +131,16 @@ export default function App() {
     const updated = upgradeUserPlan(plan);
     if (updated) {
       setUser(updated);
+      trackEvent('upgrade', { plan });
       toast.success(`Upgraded to ${plan.toUpperCase()} Plan!`);
     }
+  };
+
+  const handleCompleteOnboarding = () => {
+    completeOnboarding();
+    if (user) setUser({ ...user, hasOnboarded: true });
+    setShowOnboarding(false);
+    trackEvent('onboarding_complete');
   };
 
   // --- Feature Gates ---
@@ -120,6 +169,7 @@ export default function App() {
       const toastId = toast.loading("Reading workbook structure...");
       const context = await parseFileContext(file);
       setFileContext(context);
+      trackEvent('file_upload', { type: file.type });
       toast.dismiss(toastId);
       toast.success(`Loaded ${file.name}`);
     } catch (err) {
@@ -162,6 +212,7 @@ export default function App() {
 
       const data = await generateOrDebugFormula(prompt, mode, platform, fileContext, teamSettings);
       setResult(data);
+      trackEvent('generate_success', { mode, platform });
 
       if (!data.requiresMoreInfo) {
          const newItem: HistoryItem = {
@@ -179,6 +230,7 @@ export default function App() {
 
     } catch (error) {
       console.error(error);
+      trackEvent('generate_error', { mode });
       toast.error("Something went wrong.");
     } finally {
       setLoading(false);
@@ -190,6 +242,7 @@ export default function App() {
       try {
         generateDemoSheet(fileContext.fullData, formula, fileContext.fileName);
         toast.success("Download started!");
+        trackEvent('download_demo');
       } catch (e) {
         toast.error("Could not generate download.");
       }
@@ -206,6 +259,7 @@ export default function App() {
       await executeWorkflow(rawFile, result.steps);
       toast.dismiss(t);
       toast.success("Workflow complete! File downloaded.");
+      trackEvent('run_workflow');
     } catch (e) {
       console.error(e);
       toast.dismiss(t);
@@ -227,6 +281,7 @@ export default function App() {
       };
       setWorkflows(prev => [newWorkflow, ...prev]);
       toast.success("Workflow saved to library!");
+      trackEvent('save_workflow');
     }
   };
 
@@ -246,18 +301,30 @@ export default function App() {
     setActiveTab('tool');
   };
 
+  const handleFeedback = (helpful: boolean) => {
+     logFeedback({
+       id: Date.now().toString(),
+       userId: user?.id || 'anon',
+       prompt,
+       response: JSON.stringify(result),
+       isHelpful: helpful,
+       timestamp: Date.now()
+     });
+     toast.success("Thanks for your feedback!");
+  };
+
   // --- Render ---
-  if (loadingAuth) return null; // Or a spinner
+  if (loadingAuth) return null;
   if (!user) return <AuthScreen onLogin={handleLogin} />;
 
   const renderTab = (id: AppMode, label: string, icon: React.ReactNode, colorClass: string) => (
     <button 
       onClick={() => { setActiveTab('tool'); setMode(id); setResult(null); }}
-      className={`flex items-center space-x-2 px-3 py-2 rounded-lg text-sm font-medium transition-all ${activeTab === 'tool' && mode === id ? colorClass + ' shadow-sm' : 'text-gray-500 hover:text-gray-900 hover:bg-gray-50'}`}
+      className={`flex items-center space-x-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'tool' && mode === id ? colorClass + ' shadow-sm ring-1 ring-black/5' : 'text-gray-500 hover:text-gray-900 hover:bg-gray-100'}`}
     >
       {icon}
-      <span className="hidden lg:inline">{label}</span>
-      {isFeatureLocked(id) && <span className="ml-1 text-[10px] bg-gray-200 text-gray-500 px-1 rounded">PRO</span>}
+      <span className="hidden sm:inline">{label}</span>
+      {isFeatureLocked(id) && <span className="ml-1 text-[9px] bg-gray-200 text-gray-500 px-1 rounded uppercase tracking-wide">Pro</span>}
     </button>
   );
 
@@ -287,6 +354,11 @@ export default function App() {
         onClose={() => setShowUpgrade(false)}
         onConfirm={handleUpgrade}
       />
+      
+      <OnboardingModal
+        isOpen={showOnboarding}
+        onClose={handleCompleteOnboarding}
+      />
 
       <TeamSettings 
         isOpen={showSettings}
@@ -296,15 +368,15 @@ export default function App() {
         currentUser={user}
       />
       
-      <main className="flex-grow container mx-auto px-4 py-6 max-w-5xl relative">
+      <main className="flex-grow container mx-auto px-4 py-6 max-w-4xl relative">
         <button 
           onClick={() => setShowHistory(true)}
-          className="fixed bottom-6 right-6 lg:absolute lg:top-0 lg:right-[-60px] lg:bottom-auto bg-white p-3 rounded-full shadow-lg border border-gray-200 text-gray-500 hover:text-excel-600 z-40"
+          className="fixed bottom-6 right-6 lg:fixed lg:bottom-6 lg:right-6 bg-white p-3 rounded-full shadow-lg border border-gray-200 text-gray-500 hover:text-excel-600 z-40 transition-transform hover:scale-105"
         >
           <Clock size={20} />
         </button>
 
-        <div className="space-y-6">
+        <div className="space-y-4">
           
           {/* Navigation Bar */}
           <div className="bg-white p-1.5 rounded-xl border border-gray-200 shadow-sm flex flex-col sm:flex-row gap-2 justify-between overflow-x-auto">
@@ -318,23 +390,23 @@ export default function App() {
             </div>
             
             <div className="flex gap-1 border-t sm:border-t-0 sm:border-l border-gray-100 pt-1 sm:pt-0 sm:pl-2 min-w-max">
-              <button onClick={() => setActiveTab('workflows')} className={`flex items-center space-x-2 px-3 py-2 rounded-lg text-sm font-medium transition-all ${activeTab === 'workflows' ? 'bg-indigo-50 text-indigo-700' : 'text-gray-500 hover:text-gray-900'}`}>
+              <button onClick={() => setActiveTab('workflows')} className={`flex items-center space-x-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'workflows' ? 'bg-indigo-50 text-indigo-700 shadow-sm' : 'text-gray-500 hover:text-gray-900 hover:bg-gray-100'}`}>
                 <WorkflowIcon size={16} /><span className="hidden lg:inline">Workflows</span>
               </button>
-              <button onClick={() => setActiveTab('marketplace')} className={`flex items-center space-x-2 px-3 py-2 rounded-lg text-sm font-medium transition-all ${activeTab === 'marketplace' ? 'bg-purple-50 text-purple-700' : 'text-gray-500 hover:text-gray-900'}`}>
-                <ShoppingBag size={16} /><span className="hidden lg:inline">Market</span>
+              <button onClick={() => setActiveTab('marketplace')} className={`flex items-center space-x-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'marketplace' ? 'bg-purple-50 text-purple-700 shadow-sm' : 'text-gray-500 hover:text-gray-900 hover:bg-gray-100'}`}>
+                <ShoppingBag size={16} /><span className="hidden lg:inline">Store</span>
               </button>
-               <button onClick={() => setActiveTab('developer')} className={`flex items-center space-x-2 px-3 py-2 rounded-lg text-sm font-medium transition-all ${activeTab === 'developer' ? 'bg-gray-100 text-gray-900' : 'text-gray-500 hover:text-gray-900'}`}>
+               <button onClick={() => setActiveTab('developer')} className={`flex items-center space-x-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'developer' ? 'bg-gray-100 text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-900 hover:bg-gray-100'}`}>
                 <Terminal size={16} /><span className="hidden lg:inline">API</span>
               </button>
             </div>
           </div>
 
           {activeTab === 'tool' ? (
-            <div className="space-y-8 animate-fade-in-up">
+            <div className="space-y-6 animate-fade-in-up">
               
-              <div className="text-center space-y-2 mt-4">
-                <h2 className="text-3xl font-bold text-gray-900 tracking-tight">
+              <div className="text-center space-y-1 mt-2 mb-4">
+                <h2 className="text-2xl font-bold text-gray-900 tracking-tight">
                   {mode === 'generate' && 'Generate Formulas'}
                   {mode === 'debug' && 'Fix Broken Formulas'}
                   {mode === 'automate' && 'Automate Workflows'}
@@ -342,50 +414,58 @@ export default function App() {
                   {mode === 'analyze' && 'Analyze Sheet Health'}
                   {mode === 'chat' && 'Ask Your Data'}
                 </h2>
-                <div className="text-gray-500 text-sm max-w-xl mx-auto flex items-center justify-center gap-2">
+                <div className="text-gray-500 text-xs flex items-center justify-center gap-2">
                    {user.plan === 'free' && (
-                     <span className="bg-gray-100 text-gray-600 px-2 py-0.5 rounded text-xs font-semibold">
+                     <span className="bg-gray-100 text-gray-600 px-2 py-0.5 rounded font-semibold">
                        {user.usageToday} / {DAILY_LIMIT_FREE} daily credits
                      </span>
                    )}
                 </div>
               </div>
 
-              <FormulaInput 
-                value={prompt} 
-                onChange={setPrompt} 
-                onSubmit={handleSubmit}
-                loading={loading}
-                mode={mode}
-                platform={platform}
-                onAttach={handleAttachFile}
-                fileName={fileContext?.fileName || null}
-                columns={fileContext?.sheets[0]?.columns || []}
-                onClearFile={() => { setFileContext(null); setRawFile(null); }}
-                disabled={isFeatureLocked(mode)}
-                fileDisabled={isFileAccessLocked()}
-              />
-
-              {result && (
-                <div className="animate-fade-in-up">
-                  <FormulaOutput 
-                    result={result} 
-                    onFeedback={() => {}}
-                    onDownloadDemo={fileContext?.fullData ? handleDownloadDemo : undefined}
-                    onRunWorkflow={rawFile && result.steps ? handleRunWorkflow : undefined}
-                    onSaveWorkflow={result.steps ? handleSaveWorkflow : undefined}
-                    prompt={prompt}
+              <div className="flex flex-col lg:flex-row gap-6">
+                <div className="flex-1 min-w-0">
+                  <FormulaInput 
+                    value={prompt} 
+                    onChange={setPrompt} 
+                    onSubmit={handleSubmit}
+                    loading={loading}
                     mode={mode}
+                    platform={platform}
+                    onAttach={handleAttachFile}
+                    fileName={fileContext?.fileName || null}
+                    columns={fileContext?.sheets[0]?.columns || []}
+                    onClearFile={() => { setFileContext(null); setRawFile(null); }}
+                    disabled={isFeatureLocked(mode)}
+                    fileDisabled={isFileAccessLocked()}
                   />
-                </div>
-              )}
+                  
+                  {/* Result Area - Now directly below input for flow */}
+                  {result && (
+                    <div className="mt-6 animate-fade-in-up">
+                      <FormulaOutput 
+                        result={result} 
+                        onFeedback={handleFeedback}
+                        onDownloadDemo={fileContext?.fullData ? handleDownloadDemo : undefined}
+                        onRunWorkflow={rawFile && result.steps ? handleRunWorkflow : undefined}
+                        onSaveWorkflow={result.steps ? handleSaveWorkflow : undefined}
+                        prompt={prompt}
+                        mode={mode}
+                      />
+                    </div>
+                  )}
 
-              {!result && mode === 'generate' && (
-                 <Examples onSelect={(text) => setPrompt(text)} />
-              )}
+                  {!result && mode === 'generate' && (
+                     <div className="mt-6">
+                        <Examples onSelect={(text) => setPrompt(text)} />
+                     </div>
+                  )}
+                </div>
+              </div>
+
             </div>
           ) : activeTab === 'workflows' ? (
-             <div className="animate-fade-in-up mt-8">
+             <div className="animate-fade-in-up mt-6">
                <WorkflowLibrary 
                  workflows={workflows} 
                  onRun={handleRunSavedWorkflow} 
@@ -393,15 +473,15 @@ export default function App() {
                />
              </div>
           ) : activeTab === 'marketplace' ? (
-            <div className="animate-fade-in-up mt-8">
+            <div className="animate-fade-in-up mt-6">
               <Marketplace onPurchase={(item) => toast.success("Added to library")} />
             </div>
           ) : activeTab === 'developer' ? (
-            <div className="animate-fade-in-up mt-8">
+            <div className="animate-fade-in-up mt-6">
               <DeveloperPortal />
             </div>
           ) : (
-            <div className="animate-fade-in-up mt-8">
+            <div className="animate-fade-in-up mt-6">
               <SnippetLibrary onSelect={(formula) => {
                  setPrompt(`Explain and adapt this: ${formula}`);
                  setActiveTab('tool');

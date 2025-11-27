@@ -1,4 +1,5 @@
 
+
 import { User, PlanType } from '../types';
 
 const STORAGE_KEY = 'excel_wizard_user_v1';
@@ -40,7 +41,8 @@ export const loginMock = async (email: string): Promise<User> => {
       plan: 'free', // Default to free
       usageToday: 0,
       lastUsageDate: new Date().toISOString().split('T')[0],
-      organizationId: 'org_default'
+      organizationId: 'org_default',
+      hasOnboarded: false
     };
   }
   saveUser(user);
@@ -68,6 +70,14 @@ export const upgradeUserPlan = (plan: PlanType): User | null => {
   const updatedUser = { ...user, plan };
   saveUser(updatedUser);
   return updatedUser;
+};
+
+export const completeOnboarding = () => {
+  const user = getCurrentUser();
+  if (user) {
+    const updatedUser = { ...user, hasOnboarded: true };
+    saveUser(updatedUser);
+  }
 };
 
 export const getApiKeys = () => {
